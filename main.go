@@ -58,9 +58,15 @@ func newModel(addr string) model {
 
 func (m model) Init() tea.Cmd {
 	if m.addr != "" {
-		return textinput.Blink
+		return tea.Batch(textinput.Blink, tick())
 	}
-	return tea.Batch(textinput.Blink, publicIP)
+	return tea.Batch(textinput.Blink, tick(), publicIP)
+}
+
+type tickMsg struct{}
+
+func tick() tea.Cmd {
+	return tea.Tick(time.Second, func(time.Time) tea.Msg { return tickMsg{} })
 }
 
 type publicIPMsg string
@@ -140,6 +146,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.setFocus(!a)
 		}
 		return m, waitFor(m.in)
+
+	case tickMsg:
+		return m, tick()
 
 	case publicIPMsg:
 		m.pubIP = string(msg)
@@ -232,6 +241,22 @@ func (m model) target() Player {
 	return m.state.Players[m.state.Assigns[m.you]]
 }
 
+const barCells = 24
+
+func (m model) clock() string {
+	if m.state.Deadline == 0 {
+		return ""
+	}
+	left := max(int(time.Until(time.UnixMilli(m.state.Deadline))/time.Second)+1, 0)
+	filled := min(left*barCells/int(turnLimit/time.Second), barCells)
+	style := accent
+	if left <= 15 {
+		style = bad
+	}
+	return style.Render(fmt.Sprintf("%2ds ", left)+strings.Repeat("█", filled)) +
+		dim.Render(strings.Repeat("░", barCells-filled))
+}
+
 func (m model) status() string {
 	if !m.joined {
 		return accent.Render("Type your name and hit enter.")
@@ -263,10 +288,10 @@ func (m model) status() string {
 				dim.Render("\nHang around and watch the others suffer.")
 		}
 		if m.state.Turn == m.you {
-			return accent.Render("YOUR TURN") +
-				" — ask your yes/no question on Discord, then type a guess and hit\nenter, or ctrl+k to pass."
+			return accent.Render("YOUR TURN") + "  " + m.clock() +
+				"\nask your yes/no question, then type a guess and hit enter, or ctrl+k to pass."
 		}
-		return dim.Render(p[m.state.Turn].Name + " is asking.")
+		return dim.Render(p[m.state.Turn].Name+" is asking.") + "  " + m.clock()
 	default:
 		return accent.Render("Game over. You were: " + p[m.you].Thing)
 	}

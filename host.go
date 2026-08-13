@@ -8,7 +8,10 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 )
+
+const turnLimit = 90 * time.Second
 
 type Player struct {
 	Name  string `json:"name"`
@@ -23,6 +26,8 @@ type State struct {
 	Players []Player `json:"players"`
 	Assigns []int    `json:"assigns"`
 	Log     []string `json:"log"`
+
+	Deadline int64 `json:"deadline"`
 }
 
 type Cmd struct {
@@ -40,6 +45,9 @@ type host struct {
 	mu    sync.Mutex
 	state State
 	conns map[int]*json.Encoder
+	timer *time.Timer
+	seq   int
+	limit time.Duration
 }
 
 func serve(addr string) (string, error) {
@@ -47,7 +55,7 @@ func serve(addr string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	h := &host{state: State{Phase: "lobby"}, conns: map[int]*json.Encoder{}}
+	h := &host{state: State{Phase: "lobby"}, conns: map[int]*json.Encoder{}, limit: turnLimit}
 	go func() {
 		for {
 			c, err := ln.Accept()
@@ -154,6 +162,7 @@ func (h *host) apply(me int, c Cmd) {
 }
 
 func (h *host) newRound(why string) {
+	defer h.armTimer()
 	for i := range h.state.Players {
 		h.state.Players[i].Thing, h.state.Players[i].Done = "", false
 	}
@@ -162,7 +171,31 @@ func (h *host) newRound(why string) {
 	h.log(why)
 }
 
+func (h *host) armTimer() {
+	if h.timer != nil {
+		h.timer.Stop()
+	}
+	h.seq++
+	if h.state.Phase != "play" {
+		h.state.Deadline = 0
+		return
+	}
+	seq := h.seq
+	h.state.Deadline = time.Now().Add(h.limit).UnixMilli()
+	h.timer = time.AfterFunc(h.limit, func() {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		if h.seq != seq || h.state.Phase != "play" {
+			return
+		}
+		h.log(h.state.Players[h.state.Turn].Name + " ran out of time.")
+		h.nextTurn()
+		h.broadcast()
+	})
+}
+
 func (h *host) startPlay() {
+	defer h.armTimer()
 	p := h.state.Players
 	ids := live(p)
 	if len(ids) == 0 || slices.ContainsFunc(p, func(q Player) bool { return q.Thing == "" && !q.Off }) {
@@ -194,6 +227,7 @@ func (h *host) leave(me int) {
 }
 
 func (h *host) nextTurn() {
+	defer h.armTimer()
 	p := h.state.Players
 	if !slices.ContainsFunc(p, func(q Player) bool { return !q.Done && !q.Off }) {
 		h.state.Phase = "over"

@@ -5,7 +5,9 @@ import (
 	"io"
 	"net"
 	"slices"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestRingIsADerangement(t *testing.T) {
@@ -64,7 +66,7 @@ func TestJoinOverSocket(t *testing.T) {
 }
 
 func newHost(names ...string) *host {
-	h := &host{state: State{Phase: "lobby"}, conns: map[int]*json.Encoder{}}
+	h := &host{state: State{Phase: "lobby"}, conns: map[int]*json.Encoder{}, limit: turnLimit}
 	for _, n := range names {
 		h.join(n, json.NewEncoder(io.Discard))
 	}
@@ -93,6 +95,67 @@ func TestDropDuringAssign(t *testing.T) {
 	}
 	if h.state.Turn == 2 {
 		t.Fatal("turn landed on the player who left")
+	}
+}
+
+func TestTurnTimeout(t *testing.T) {
+	h := newHost("ann", "bo")
+	h.limit = 20 * time.Millisecond
+	h.apply(0, Cmd{Cmd: "start"})
+	h.apply(0, Cmd{Cmd: "thing", Text: "x"})
+	h.apply(1, Cmd{Cmd: "thing", Text: "y"})
+
+	h.mu.Lock()
+	deadline := h.state.Deadline
+	h.mu.Unlock()
+	if deadline == 0 {
+		t.Fatal("play started with no deadline")
+	}
+
+	time.Sleep(80 * time.Millisecond)
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !slices.ContainsFunc(h.state.Log, func(l string) bool { return strings.Contains(l, "ran out of time") }) {
+		t.Fatalf("turn never timed out: %v", h.state.Log)
+	}
+}
+
+func TestTimerStopsOffTurn(t *testing.T) {
+	h := newHost("ann", "bo")
+	h.limit = 20 * time.Millisecond
+	h.apply(0, Cmd{Cmd: "start"})
+	h.apply(0, Cmd{Cmd: "thing", Text: "x"})
+	h.apply(1, Cmd{Cmd: "thing", Text: "y"})
+	h.apply(0, Cmd{Cmd: "restart"})
+
+	time.Sleep(80 * time.Millisecond)
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.state.Phase != "assign" || h.state.Deadline != 0 {
+		t.Fatalf("timer still running outside play: %+v", h.state)
+	}
+	if slices.ContainsFunc(h.state.Log, func(l string) bool { return strings.Contains(l, "ran out of time") }) {
+		t.Fatalf("stale timer fired after restart: %v", h.state.Log)
+	}
+}
+
+func TestClockBar(t *testing.T) {
+	at := func(d time.Duration) string {
+		return model{state: State{Deadline: time.Now().Add(d).UnixMilli()}}.clock()
+	}
+	if got := strings.Count(at(turnLimit), "█"); got != barCells {
+		t.Fatalf("fresh turn drew %d/%d cells", got, barCells)
+	}
+	if got := strings.Count(at(-time.Minute), "░"); got != barCells {
+		t.Fatalf("expired turn drew %d/%d empty cells", got, barCells)
+	}
+	if got := strings.Count(at(10*turnLimit), "█"); got != barCells {
+		t.Fatalf("a skewed clock overflowed the bar: %d cells", got)
+	}
+	if (model{}).clock() != "" {
+		t.Fatal("no deadline should draw nothing")
 	}
 }
 
